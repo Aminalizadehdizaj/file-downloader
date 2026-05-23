@@ -44,7 +44,6 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
-            aria2 \
             zip \
             curl \
             bc \
@@ -69,15 +68,6 @@ jobs:
           # ------------------------------------------------------------
           # HELPERS
           # ------------------------------------------------------------
-
-          sanitize_filename() {
-            local f="$1"
-            f=$(echo "$f" | sed 's/[?#].*//')
-            f=$(echo "$f" | sed 's/%20/ /g')
-            f=$(echo "$f" | sed 's/%2F/-/g')
-            f=$(echo "$f" | sed 's/[<>:"\\|?*]/_/g')
-            echo "$f"
-          }
 
           detect_bad_download() {
             local file="$1"
@@ -115,73 +105,40 @@ jobs:
             return 0
           }
 
-          download_file() {
+          download_file_post() {
             local url="$1"
             local filename="$2"
             local dest="tmp_downloads/$filename"
             local delay=5
 
             for attempt in 1 2 3; do
-              echo "  [${attempt}/3] $filename"
-              rm -f "$dest" "${dest}.aria2"
+              echo "  [${attempt}/3] $filename via POST Handshake"
+              rm -f "$dest"
 
-              # Try aria2c with explicit browser-like headers and redirect logging
-              aria2c \
-                --follow-metalink=true \
-                --check-certificate=false \
-                --content-disposition-default-utf8=true \
-                --split=4 \
-                --max-connection-per-server=4 \
-                --min-split-size=10M \
-                --max-tries=3 \
-                --retry-wait=5 \
-                --timeout=60 \
-                --connect-timeout=45 \
-                --allow-overwrite=true \
-                --auto-file-renaming=false \
-                --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
-                --header="Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8" \
-                --header="Accept-Language: en-US,en;q=0.9" \
-                --header="Sec-Fetch-Mode: navigate" \
-                --dir=tmp_downloads \
-                --out="$filename" \
-                "$url" >/dev/null 2>&1 || true
-
-              if [ -s "$dest" ]; then
-                if detect_bad_download "$dest"; then
-                  echo "  aria2c target rejected download token or received text/html frame"
-                  rm -f "$dest"
-                else
-                  MIME=$(file --brief --mime-type "$dest" || true)
-                  echo "  aria2c OK ($MIME)"
-                  return 0
-                fi
-              fi
-
-              rm -f "$dest" "${dest}.aria2"
-
-              # Curl Fallback with deep handshake verification, complete redirect tracing, and browser mirroring
+              # Use curl to execute a direct POST request, follow authentication locations (-L),
+              # and mimic standard browser handshake structures.
               curl \
+                -X POST \
                 -L \
                 -f \
                 --retry 2 \
                 --retry-delay 5 \
-                --connect-timeout 45 \
+                --connect-timeout 60 \
                 --max-time 7200 \
+                -H "Origin: https://earthexplorer.usgs.gov" \
+                -H "Referer: https://earthexplorer.usgs.gov/" \
                 -H "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8" \
-                -H "Accept-Language: en-US,en;q=0.9" \
-                -H "Upgrade-Insecure-Requests: 1" \
                 -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
                 -o "$dest" \
-                "$url" >/dev/null 2>&1 || true
+                "$url" || true
 
               if [ -s "$dest" ]; then
                 if detect_bad_download "$dest"; then
-                  echo "  curl target rejected download token or received text/html frame"
+                  echo "  Server rejected POST payload or returned an HTML error screen."
                   rm -f "$dest"
                 else
                   MIME=$(file --brief --mime-type "$dest" || true)
-                  echo "  curl OK ($MIME)"
+                  echo "  Download successful ($MIME)"
                   return 0
                 fi
               fi
@@ -204,19 +161,21 @@ jobs:
           echo "=== Phase 1: Downloading ==="
           
           for URL in $URLS; do
-            FILENAME=$(basename "$URL")
-            FILENAME=$(sanitize_filename "$FILENAME")
+            # Extract the actual product scene identity cleanly from the URL path segments
+            # e.g., extracts "D3C1216-100065A013" from the url string
+            CLEAN_NAME=$(echo "$URL" | awk -F'/' '{print $(NF-1)}')
             
-            # If filename extraction matches a token instead of an extension, target it clearly
-            if [ -z "$FILENAME" ] || [ ${#FILENAME} -gt 40 ]; then
-              FILENAME="data_payload.zip"
+            if [ -z "$CLEAN_NAME" ] || [ "$CLEAN_NAME" = "download" ]; then
+              FILENAME="usgs_payload.zip"
+            else
+              FILENAME="${CLEAN_NAME}.zip"
             fi
 
             echo ""
             echo "URL:  $URL"
             echo "File: $FILENAME"
 
-            download_file "$URL" "$FILENAME" || true
+            download_file_post "$URL" "$FILENAME" || true
           done
 
           # ------------------------------------------------------------
@@ -231,8 +190,8 @@ jobs:
           done
 
           if [ ${#VALID[@]} -gt 0 ]; then
-            ARCHIVE="payload_$(date +%Y%m%d_%H%M%S)"
-            echo "Creating archive chunks: $ARCHIVE"
+            ARCHIVE="usgs_data_$(date +%Y%m%d_%H%M%S)"
+            echo "Creating split archive chunks: $ARCHIVE"
             do_zip_multi \
               "$STAGING/${ARCHIVE}.zip" \
               "$SPLIT_MB" \
@@ -258,7 +217,7 @@ jobs:
           body: |
             ### 📥 Your Requested Download is Ready!
             
-            Your large file payload has been safely broken down into separate, smaller 95MB chunk assets below.
+            Your USGS data payload has been safely broken down into separate, smaller 95MB chunk assets below.
             
             #### 🛠️ How to reassemble this file:
             1. Download **all** listed assets below to the exact same folder on your computer.
