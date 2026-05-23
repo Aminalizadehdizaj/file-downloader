@@ -59,7 +59,6 @@ jobs:
           ZIP_PASSWORD="${{ github.event.inputs.password }}"
 
           SPLIT_MB=95
-
           STAGING="/tmp/staging_downloads"
 
           mkdir -p "$STAGING"
@@ -224,7 +223,6 @@ jobs:
 
           if [ ${#VALID[@]} -gt 0 ]; then
             ARCHIVE="archive_$(date +%Y%m%d_%H%M%S)"
-            # Keep flat in staging directory for cleaner asset uploading
             echo "Creating archive: $ARCHIVE"
             do_zip_multi \
               "$STAGING/${ARCHIVE}.zip" \
