@@ -60,7 +60,7 @@ jobs:
 
           SPLIT_MB=95
 
-          STAGING="/tmp/staging_$$"
+          STAGING="/tmp/staging_downloads"
 
           mkdir -p "$STAGING"
           mkdir -p tmp_downloads
@@ -224,11 +224,10 @@ jobs:
 
           if [ ${#VALID[@]} -gt 0 ]; then
             ARCHIVE="archive_$(date +%Y%m%d_%H%M%S)"
-            mkdir -p "$STAGING/$ARCHIVE"
-
+            # Keep flat in staging directory for cleaner asset uploading
             echo "Creating archive: $ARCHIVE"
             do_zip_multi \
-              "$STAGING/$ARCHIVE/${ARCHIVE}.zip" \
+              "$STAGING/${ARCHIVE}.zip" \
               "$SPLIT_MB" \
               "${VALID[@]}"
 
@@ -243,24 +242,21 @@ jobs:
           echo "=== Final staging contents ==="
           find "$STAGING" -type f | sort
 
-      - name: Publish to GitHub Releases
-        uses: softprops/action-gh-releases@v2
+      - name: Create Release and Upload Chunks
+        uses: ncipollo/release-action@v1
         with:
-          tag_name: "dl-${{ github.run_id }}-${{ github.run_attempt }}"
+          tag: "dl-${{ github.run_id }}-${{ github.run_attempt }}"
           name: "📦 Download Archive (${{ github.run_id }})"
+          allowUpdates: true
           body: |
             ### 📥 Your Requested Download is Ready!
             
-            Your massive file payload has been successfully broken down into safe, individual chunk assets below.
+            Your large file payload has been safely broken down into separate, smaller 95MB chunk assets below.
             
             #### 🛠️ How to reassemble this file:
-            1. Download **all** listed part files below to the exact same folder on your local machine.
+            1. Download **all** listed assets below to the exact same folder on your computer.
             2. Verify you have the master `.zip` file alongside all numerical extensions (`.z01`, `.z02`, etc.).
-            3. Open **only** the primary `.zip` extension file using a tool like [7-Zip](https://www.7-zip.org/) or [WinRAR](https://www.rarlab.com/).
-            4. Click **Extract**, and the utility engine will auto-combine all pieces seamlessly back into your single original file.
-          files: |
-            /tmp/staging_*/**/*
-          draft: false
-          prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            3. Open **only** the primary file ending exactly in `.zip` using [7-Zip](https://www.7-zip.org/) or [WinRAR](https://www.rarlab.com/).
+            4. Choose **Extract**, and your software will auto-combine all chunks back into your single original file.
+          artifacts: "/tmp/staging_downloads/*"
+          token: ${{ secrets.GITHUB_TOKEN }}
