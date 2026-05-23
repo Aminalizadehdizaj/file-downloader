@@ -125,27 +125,27 @@ jobs:
               echo "  [${attempt}/3] $filename"
               rm -f "$dest" "${dest}.aria2"
 
-              # Try aria2c
+              # Try aria2c (High speed multi-connection)
               aria2c \
                 --follow-metalink=true \
                 --content-disposition-default-utf8=true \
-                --split=2 \
-                --max-connection-per-server=2 \
-                --min-split-size=20M \
+                --split=4 \
+                --max-connection-per-server=4 \
+                --min-split-size=10M \
                 --max-tries=2 \
                 --retry-wait=5 \
                 --timeout=60 \
                 --connect-timeout=30 \
                 --check-certificate=false \
                 --allow-overwrite=true \
-                --auto-file-renaming=true \
+                --auto-file-renaming=false \
                 --dir=tmp_downloads \
                 --out="$filename" \
                 "$url" >/dev/null 2>&1 || true
 
               if [ -s "$dest" ]; then
                 if detect_bad_download "$dest"; then
-                  echo "  aria2c downloaded HTML/error page"
+                  echo "  aria2c downloaded an invalid page/error text"
                   rm -f "$dest"
                 else
                   MIME=$(file --brief --mime-type "$dest" || true)
@@ -170,7 +170,7 @@ jobs:
 
               if [ -s "$dest" ]; then
                 if detect_bad_download "$dest"; then
-                  echo "  curl downloaded HTML/error page"
+                  echo "  curl downloaded an invalid page/error text"
                   rm -f "$dest"
                 else
                   MIME=$(file --brief --mime-type "$dest" || true)
@@ -199,8 +199,10 @@ jobs:
           for URL in $URLS; do
             FILENAME=$(basename "$URL")
             FILENAME=$(sanitize_filename "$FILENAME")
-            if [ -z "$FILENAME" ]; then
-              FILENAME="file_$(date +%s)"
+            
+            # Ensure file defaults to an identifiable zip extension if missing
+            if [ -z "$FILENAME" ] || [ "$FILENAME" = "download" ]; then
+              FILENAME="archive.zip"
             fi
 
             echo ""
@@ -222,8 +224,8 @@ jobs:
           done
 
           if [ ${#VALID[@]} -gt 0 ]; then
-            ARCHIVE="archive_$(date +%Y%m%d_%H%M%S)"
-            echo "Creating archive: $ARCHIVE"
+            ARCHIVE="payload_$(date +%Y%m%d_%H%M%S)"
+            echo "Creating archive chunks: $ARCHIVE"
             do_zip_multi \
               "$STAGING/${ARCHIVE}.zip" \
               "$SPLIT_MB" \
