@@ -1,0 +1,481 @@
+name: 🔥 Full Downloader
+
+on:
+  workflow_dispatch:
+    inputs:
+      urls:
+        description: '🔗 Download URLs (space-separated for multiple)'
+        required: true
+        type: string
+
+      password:
+        description: '🔒 Zip password (optional)'
+        required: false
+        default: ''
+        type: string
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  save-file:
+    name: "📥 Download File"
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Validate inputs
+        run: |
+          if [ -z "${{ github.event.inputs.urls }}" ]; then
+            echo "❌ No download URL provided."
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+          git config http.postBuffer 524288000
+          git config http.maxRequestBuffer 100M
+
+          git config core.compression 0
+          git config pack.windowMemory 256m
+          git config pack.packSizeLimit 100m
+          git config pack.threads 1
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            aria2 \
+            zip \
+            curl \
+            bc \
+            file
+
+      - name: Download and package files
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          URLS="${{ github.event.inputs.urls }}"
+          ZIP_PASSWORD="${{ github.event.inputs.password }}"
+
+          SPLIT_MB=95
+
+          REPO_OWNER="${{ github.repository_owner }}"
+          REPO_NAME="${{ github.event.repository.name }}"
+          BRANCH="${GITHUB_REF_NAME}"
+
+          STAGING="/tmp/staging_$$"
+
+          mkdir -p "$STAGING"
+          mkdir -p tmp_downloads
+
+          echo "$STAGING" > /tmp/staging_path.txt
+
+          # ------------------------------------------------------------
+          # HELPERS
+          # ------------------------------------------------------------
+
+          urlencode() {
+            python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1],safe=''))" "$1"
+          }
+
+          unique_folder() {
+            local base="$1"
+            local name="$2"
+
+            local n=2
+            local candidate="$name"
+
+            while [ -d "$base/$candidate" ]; do
+              candidate="${name}_${n}"
+              n=$(( n + 1 ))
+            done
+
+            echo "$candidate"
+          }
+
+          detect_bad_download() {
+            local file="$1"
+
+            [ ! -s "$file" ] && return 0
+
+            MIME=$(file --brief --mime-type "$file" || true)
+
+            if [[ "$MIME" == text/html* ]]; then
+              return 0
+            fi
+
+            if [[ "$MIME" == text/plain* ]]; then
+              SIZE=$(stat -c%s "$file" 2>/dev/null || echo 0)
+
+              if [ "$SIZE" -lt 5000 ]; then
+                return 0
+              fi
+            fi
+
+            return 1
+          }
+
+          sanitize_filename() {
+            local f="$1"
+
+            f=$(echo "$f" | sed 's/[?#].*//')
+            f=$(echo "$f" | sed 's/%20/ /g')
+            f=$(echo "$f" | sed 's/%2F/-/g')
+            f=$(echo "$f" | sed 's/[<>:"\\|?*]/_/g')
+
+            echo "$f"
+          }
+
+          do_zip_multi() {
+            local dest="$1"
+            local split="$2"
+            shift 2
+
+            if [ -n "$ZIP_PASSWORD" ]; then
+              zip \
+                -j \
+                -P "$ZIP_PASSWORD" \
+                -s "${split}m" \
+                "$dest" \
+                "$@"
+            else
+              zip \
+                -j \
+                -s "${split}m" \
+                "$dest" \
+                "$@"
+            fi
+
+            ZIP_EXIT=$?
+
+            # zip:
+            # 0 = success
+            # 1 = warning
+            # >1 = real failure
+
+            if [ "$ZIP_EXIT" -gt 1 ]; then
+              echo "❌ zip failed with exit code $ZIP_EXIT"
+              return "$ZIP_EXIT"
+            fi
+
+            echo "✅ zip completed (exit=$ZIP_EXIT)"
+            return 0
+          }
+
+          readme_zip_parts() {
+            local folder="$1"
+            local fname="$2"
+            local aname="$3"
+
+            local fenc
+            fenc=$(urlencode "$fname")
+
+            local protected="NO"
+
+            [ -n "$ZIP_PASSWORD" ] && protected="YES"
+
+            local links=""
+            local n=0
+            local total=0
+
+            while IFS= read -r -d '' part; do
+
+              local pb
+              local penc
+              local psz
+
+              pb=$(basename "$part")
+              penc=$(urlencode "$pb")
+              psz=$(stat -c%s "$part" 2>/dev/null || echo 0)
+
+              n=$(( n + 1 ))
+              total=$(( total + psz ))
+
+              links+="| $n | \`$pb\` | [Download](https://github.com/${REPO_OWNER}/${REPO_NAME}/raw/${BRANCH}/downloads/${fenc}/${penc}) |"$'\n'
+
+            done < <(
+              find "$folder" -maxdepth 1 \
+                \( -name "*.zip" -o -name "*.z[0-9]*" \) \
+                -print0 2>/dev/null | sort -z
+            )
+
+            local size_mb
+            size_mb=$(echo "scale=2; $total/1048576" | bc)
+
+            {
+              printf '# %s\n\n' "${aname}"
+
+              printf '| Property | Value |\n'
+              printf '|----------|-------|\n'
+
+              printf '| **Archive** | `%s.zip` |\n' "${aname}"
+              printf '| **Total Size** | %s MB — %s part(s) |\n' "${size_mb}" "${n}"
+              printf '| **Password Protected** | **%s** |\n' "${protected}"
+              printf '| **Status** | Complete |\n\n'
+
+              printf '## Download Links\n\n'
+
+              printf '| # | File | Link |\n'
+              printf '|---|------|------|\n'
+              printf '%s' "${links}"
+
+              printf '\n'
+              printf '## How to Extract\n\n'
+
+              printf '1. Download all parts\n'
+              printf '2. Open `.zip` file with 7-Zip or WinRAR\n'
+
+              if [ -n "$ZIP_PASSWORD" ]; then
+                printf '3. Enter password when prompted\n'
+              fi
+
+            } > "$folder/README.md"
+          }
+
+          readme_error() {
+            local folder="$1"
+            local fn="$2"
+            local url="$3"
+
+            {
+              printf '# %s — Download Failed\n\n' "${fn}"
+
+              printf '| Property | Value |\n'
+              printf '|----------|-------|\n'
+
+              printf '| **File** | `%s` |\n' "${fn}"
+              printf '| **URL** | %s |\n' "${url}"
+              printf '| **Date** | %s |\n' "$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+              printf '| **Status** | FAILED |\n'
+
+            } > "$folder/README.md"
+          }
+
+          download_file() {
+            local url="$1"
+            local filename="$2"
+
+            local dest="tmp_downloads/$filename"
+
+            local delay=5
+
+            for attempt in 1 2 3; do
+
+              echo "  [${attempt}/3] $filename"
+
+              rm -f "$dest" "${dest}.aria2"
+
+              # --------------------------------------------------------
+              # aria2c
+              # --------------------------------------------------------
+
+              aria2c \
+                --follow-metalink=true \
+                --content-disposition-default-utf8=true \
+                --split=2 \
+                --max-connection-per-server=2 \
+                --min-split-size=20M \
+                --max-tries=2 \
+                --retry-wait=5 \
+                --timeout=60 \
+                --connect-timeout=30 \
+                --check-certificate=false \
+                --allow-overwrite=true \
+                --auto-file-renaming=true \
+                --dir=tmp_downloads \
+                --out="$filename" \
+                "$url" >/dev/null 2>&1 || true
+
+              if [ -s "$dest" ]; then
+
+                if detect_bad_download "$dest"; then
+                  echo "  aria2c downloaded HTML/error page"
+                  rm -f "$dest"
+                else
+                  MIME=$(file --brief --mime-type "$dest" || true)
+                  echo "  aria2c OK ($MIME)"
+                  return 0
+                fi
+              fi
+
+              rm -f "$dest" "${dest}.aria2"
+
+              # --------------------------------------------------------
+              # curl fallback
+              # --------------------------------------------------------
+
+              curl \
+                -L \
+                -f \
+                --retry 2 \
+                --retry-delay 5 \
+                --connect-timeout 30 \
+                --max-time 7200 \
+                -A "Mozilla/5.0" \
+                -o "$dest" \
+                "$url" >/dev/null 2>&1 || true
+
+              if [ -s "$dest" ]; then
+
+                if detect_bad_download "$dest"; then
+                  echo "  curl downloaded HTML/error page"
+                  rm -f "$dest"
+                else
+                  MIME=$(file --brief --mime-type "$dest" || true)
+                  echo "  curl OK ($MIME)"
+                  return 0
+                fi
+              fi
+
+              rm -f "$dest"
+
+              if [ "$attempt" -lt 3 ]; then
+                echo "  Retry in ${delay}s..."
+                sleep "$delay"
+                delay=$(( delay * 2 ))
+              fi
+            done
+
+            echo "  FAILED: $filename"
+            return 1
+          }
+
+          # ------------------------------------------------------------
+          # PHASE 1: DOWNLOAD
+          # ------------------------------------------------------------
+
+          echo "=== Phase 1: Downloading ==="
+
+          FAILED_NAMES=()
+          FAILED_URLS=()
+
+          for URL in $URLS; do
+
+            FILENAME=$(basename "$URL")
+            FILENAME=$(sanitize_filename "$FILENAME")
+
+            if [ -z "$FILENAME" ]; then
+              FILENAME="file_$(date +%s)"
+            fi
+
+            echo ""
+            echo "URL:  $URL"
+            echo "File: $FILENAME"
+
+            if ! download_file "$URL" "$FILENAME"; then
+              FAILED_NAMES+=("$FILENAME")
+              FAILED_URLS+=("$URL")
+            fi
+
+          done
+
+          # ------------------------------------------------------------
+          # PHASE 2: PACKAGE
+          # ------------------------------------------------------------
+
+          echo ""
+          echo "=== Phase 2: Packaging ==="
+
+          VALID=()
+
+          for f in tmp_downloads/*; do
+            [ -f "$f" ] && [ -s "$f" ] && VALID+=("$f")
+          done
+
+          if [ ${#VALID[@]} -gt 0 ]; then
+
+            ARCHIVE="archive_$(date +%Y%m%d_%H%M%S)"
+
+            FOLDER=$(unique_folder "$STAGING" "$ARCHIVE")
+
+            mkdir -p "$STAGING/$FOLDER"
+
+            echo "Creating archive: $ARCHIVE"
+
+            do_zip_multi \
+              "$STAGING/$FOLDER/${ARCHIVE}.zip" \
+              "$SPLIT_MB" \
+              "${VALID[@]}"
+
+            readme_zip_parts \
+              "$STAGING/$FOLDER" \
+              "$FOLDER" \
+              "$ARCHIVE"
+
+            echo "Packaged: $FOLDER"
+
+          else
+            echo "No valid downloads."
+          fi
+
+          # ------------------------------------------------------------
+          # ERROR READMEs
+          # ------------------------------------------------------------
+
+          for i in "${!FAILED_NAMES[@]}"; do
+
+            fn="${FAILED_NAMES[$i]}"
+            url="${FAILED_URLS[$i]}"
+
+            no_ext="${fn%.*}"
+
+            FOLDER=$(unique_folder "$STAGING" "${no_ext}_error")
+
+            mkdir -p "$STAGING/$FOLDER"
+
+            readme_error \
+              "$STAGING/$FOLDER" \
+              "$fn" \
+              "$url"
+
+          done
+
+          rm -rf tmp_downloads
+
+          echo ""
+          echo "=== Final staging ==="
+
+          find "$STAGING" -type f | sort
+
+      - name: Build downloads index
+        run: |
+          STAGING=$(cat /tmp/staging_path.txt)
+
+          mkdir -p downloads
+
+          if [ -d "$STAGING" ]; then
+            cp -r "$STAGING"/. downloads/ || true
+          fi
+
+          {
+            echo "# Downloaded Files"
+            echo ""
+
+            find downloads \
+              -mindepth 1 \
+              -maxdepth 1 \
+              -type d \
+              -printf '- [%f](./%f)\n' \
+              | sort
+
+          } > downloads/README.md
+
+      - name: Commit and push
+        run: |
+          git add downloads/
+          git commit -m "Update downloads [skip ci]" || echo "Nothing to commit"
+          git push
